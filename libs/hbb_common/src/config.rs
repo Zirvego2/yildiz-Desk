@@ -54,7 +54,7 @@ const CONFIG_STORE_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 #[cfg(target_os = "macos")]
 lazy_static::lazy_static! {
-    pub static ref ORG: RwLock<String> = RwLock::new("com.carriez".to_owned());
+    pub static ref ORG: RwLock<String> = RwLock::new("com.yildizpos".to_owned());
 }
 
 type Size = (i32, i32, i32, i32);
@@ -68,18 +68,18 @@ lazy_static::lazy_static! {
     static ref ONLINE: Mutex<HashMap<String, i64>> = Default::default();
     pub static ref PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new("".to_owned());
     pub static ref EXE_RENDEZVOUS_SERVER: RwLock<String> = Default::default();
-    pub static ref APP_NAME: RwLock<String> = RwLock::new("RustDesk".to_owned());
+    pub static ref APP_NAME: RwLock<String> = RwLock::new("YildizDesk".to_owned());
     static ref KEY_PAIR: Mutex<Option<KeyPair>> = Default::default();
     static ref USER_DEFAULT_CONFIG: RwLock<(UserDefaultConfig, Instant)> = RwLock::new((UserDefaultConfig::load(), Instant::now()));
     pub static ref NEW_STORED_PEER_CONFIG: Mutex<HashSet<String>> = Default::default();
     pub static ref DEFAULT_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
-    pub static ref OVERWRITE_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+    pub static ref OVERWRITE_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(yildiz_overwrite_settings());
     pub static ref DEFAULT_DISPLAY_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
     pub static ref OVERWRITE_DISPLAY_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
     pub static ref DEFAULT_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
     pub static ref OVERWRITE_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
     pub static ref HARD_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
-    pub static ref BUILTIN_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+    pub static ref BUILTIN_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(yildiz_builtin_settings());
 }
 
 #[cfg(target_os = "android")]
@@ -113,8 +113,37 @@ const CHARS: &[char] = &[
     'm', 'n', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
 ];
 
-pub const RENDEZVOUS_SERVERS: &[&str] = &["rs-ny.rustdesk.com"];
-pub const RS_PUB_KEY: &str = "OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=";
+pub const RENDEZVOUS_SERVERS: &[&str] = &["destek.yildizpos.com"];
+pub const RS_PUB_KEY: &str = "KXlQDkKpk7Y+aWVxJe+JLGdiTLW5fxf0eAM+ElYr8g8=";
+
+// ---- YildizDesk: sunucuya ozel gomulu ayarlar (gizli bilgi icermez) ----
+pub const YILDIZ_SERVER: &str = "destek.yildizpos.com";
+
+fn yildiz_overwrite_settings() -> HashMap<String, String> {
+    [
+        ("custom-rendezvous-server", YILDIZ_SERVER),
+        ("api-server", "https://destek.yildizpos.com"),
+        ("key", RS_PUB_KEY),
+        // Hem tek seferlik hem sabit sifre gecerli.
+        ("verification-method", "use-both-passwords"),
+        // Dogru sifre girilirse ayrica "kabul et" sorulmaz.
+        ("approve-mode", "password"),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect()
+}
+
+fn yildiz_builtin_settings() -> HashMap<String, String> {
+    [
+        // Musteri sunucu ve ag ayarlarini goremez/degistiremez.
+        ("hide-server-settings", "Y"),
+        ("hide-proxy-settings", "Y"),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect()
+}
 
 pub const RENDEZVOUS_PORT: i32 = 21116;
 pub const RELAY_PORT: i32 = 21117;
