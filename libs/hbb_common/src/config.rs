@@ -68,7 +68,7 @@ lazy_static::lazy_static! {
     static ref ONLINE: Mutex<HashMap<String, i64>> = Default::default();
     pub static ref PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new("".to_owned());
     pub static ref EXE_RENDEZVOUS_SERVER: RwLock<String> = Default::default();
-    pub static ref APP_NAME: RwLock<String> = RwLock::new("YildizDesk".to_owned());
+    pub static ref APP_NAME: RwLock<String> = RwLock::new(yildiz_app_name());
     static ref KEY_PAIR: Mutex<Option<KeyPair>> = Default::default();
     static ref USER_DEFAULT_CONFIG: RwLock<(UserDefaultConfig, Instant)> = RwLock::new((UserDefaultConfig::load(), Instant::now()));
     pub static ref NEW_STORED_PEER_CONFIG: Mutex<HashSet<String>> = Default::default();
@@ -78,7 +78,7 @@ lazy_static::lazy_static! {
     pub static ref OVERWRITE_DISPLAY_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
     pub static ref DEFAULT_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
     pub static ref OVERWRITE_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
-    pub static ref HARD_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+    pub static ref HARD_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(yildiz_hard_settings());
     pub static ref BUILTIN_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(yildiz_builtin_settings());
 }
 
@@ -132,6 +132,30 @@ fn yildiz_overwrite_settings() -> HashMap<String, String> {
     .iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect()
+}
+
+// YildizDesk iki kimlikle calisir (programin dosya adina gore):
+//  - YildizDesk.exe      : musteri/restoran. Yalnizca GELEN baglanti; ID + sifre gosterir, ayar/baglan arayuzu yok.
+//  - YildizDeskAdmin.exe : yonetici bilgisayari. Giden baglanti serbest (YildizDesk Yonetici bunu kullanir).
+// Ayri uygulama adi = ayri ayar klasoru, ayri ID, ayri tek-kopya kilidi.
+fn yildiz_is_admin_variant() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_lowercase()))
+        .map_or(false, |s| s == "yildizdeskadmin")
+}
+
+fn yildiz_app_name() -> String {
+    let name = if yildiz_is_admin_variant() { "YildizDeskAdmin" } else { "YildizDesk" };
+    name.to_owned()
+}
+
+fn yildiz_hard_settings() -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    if !yildiz_is_admin_variant() {
+        m.insert("conn-type".to_owned(), "incoming".to_owned());
+    }
+    m
 }
 
 fn yildiz_builtin_settings() -> HashMap<String, String> {

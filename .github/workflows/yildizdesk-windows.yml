@@ -147,23 +147,35 @@ jobs:
           name: topmostwindow-artifacts-x64
           path: "./rustdesk"
 
-      - name: Build self-extracted executable (YildizDesk.exe)
-        # Kurulum, calisan dosyanin adinin <uygulama adi>.exe olmasini bekler (APP_NAME = YildizDesk).
+      - name: Build self-extracted executables (YildizDesk.exe + YildizDeskAdmin.exe)
+        # Ayni derlemeden iki paket: uygulama kimligi (musteri / yonetici) programin DOSYA ADINDAN secilir
+        # (libs/hbb_common/src/config.rs: yildiz_is_admin_variant). Kurulum <uygulama adi>.exe adini bekler.
         shell: bash
         run: |
           sed -i '/dpiAware/d' res/manifest.xml
+          mkdir -p ./SignOutput
+          pip3 install -r libs/portable/requirements.txt
+
+          # 1) Musteri / restoran: YildizDesk.exe (yalnizca gelen baglanti)
           mv ./rustdesk/rustdesk.exe ./rustdesk/YildizDesk.exe
           pushd ./libs/portable
-          pip3 install -r requirements.txt
           python3 ./generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/YildizDesk.exe
           popd
-          mkdir -p ./SignOutput
           mv ./target/release/rustdesk-portable-packer.exe ./SignOutput/YildizDesk.exe
+
+          # 2) Yonetici bilgisayari: YildizDeskAdmin.exe (giden baglanti serbest)
+          mv ./rustdesk/YildizDesk.exe ./rustdesk/YildizDeskAdmin.exe
+          pushd ./libs/portable
+          python3 ./generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/YildizDeskAdmin.exe
+          popd
+          mv ./target/release/rustdesk-portable-packer.exe ./SignOutput/YildizDeskAdmin.exe
           ls -l ./SignOutput
 
-      - name: Upload YildizDesk.exe
+      - name: Upload YildizDesk.exe + YildizDeskAdmin.exe
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: YildizDesk-windows-x64
-          path: ./SignOutput/YildizDesk.exe
+          path: |
+            ./SignOutput/YildizDesk.exe
+            ./SignOutput/YildizDeskAdmin.exe
           if-no-files-found: error
