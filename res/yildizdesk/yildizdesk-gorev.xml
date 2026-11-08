@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<!--
+  YildizDesk guncelleyici gorevi (Gorev Zamanlayici). Tek kaynak: motorun kurulumu da, Guncelleyici-Kur.cmd de BU sablonu kullanir.
+  Uc yer tutucu (cift suslu parantez icinde, asagidaki Command, Arguments ve StartBoundary alanlarinda) kurulum sirasinda doldurulur (XML-kacisli):
+  POWERSHELL_YOLU = powershell.exe tam yolu (PATH'e guvenilmez); BETIK_YOLU = kurulu guncelleyici betik yolu
+  (ProgramData\YildizDesk\yildizdesk-guncelle.ps1); BASLANGIC = tekrarlayan tetikleyicinin ilk zamani (yerel saat, kurulumdan ~10 dk sonra).
+  NEDEN XML: Get-ScheduledTask / Register-ScheduledTask WMI (CIM) kullanir; bazi bilgisayarlarda WMI takilir ve kurulum sonsuza dek bekler.
+  schtasks.exe /Create /XML dogrudan Gorev Zamanlayici'ya konusur, WMI'a hic dokunmaz.
+  Gorev: SYSTEM, en yuksek yetki; acilistan 3 dk sonra + her 6 saatte bir; ayni anda tek kopya; en cok 1 saat; gizli.
+-->
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>YildizDesk otomatik guncelleme (imzali bildirim, asamali dagitim, otomatik geri alma)</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+      <Delay>PT3M</Delay>
+    </BootTrigger>
+    <TimeTrigger>
+      <Repetition>
+        <Interval>PT6H</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+      <StartBoundary>{{BASLANGIC}}</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>true</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT1H</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{{POWERSHELL_YOLU}}</Command>
+      <Arguments>-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "{{BETIK_YOLU}}"</Arguments>
+    </Exec>
+  </Actions>
+</Task>

@@ -1,6 +1,8 @@
 ﻿<#
   YıldızDesk güncelleyici — restoran bilgisayarında SYSTEM olarak, Görev Zamanlayıcı ("YildizDesk Guncelle") ile çalışır.
-  Windows PowerShell 5.1 uyumludur. Kurulum: guncelleyici-kur.ps1 (UAC'li, her bilgisayarda bir kez).
+  Windows PowerShell 5.1 uyumludur. Kurulum: YıldızDesk 1.5.3 ve sonrasında motorla birlikte kendiliğinden; eski kurulumlarda
+  Guncelleyici-Kur.cmd (UAC'li, bilgisayar başına bir kez).
+  WMI/CIM KULLANMAZ: bazı bilgisayarlarda WMI takılır ve betik sonsuza dek beklerdi (Get-CimInstance yok; süreç komut satırı doğrudan okunur).
 
   Akış (her adım güvenli kapanır; şüphede GÜNCELLEME YAPILMAZ):
     1. Tek kopya kilidi (+ 0-10 dk rastgele gecikme: bilgisayarlar aynı anda sunucuya yüklenmesin)
@@ -19,6 +21,9 @@
     -AcikAnahtarDosyasi    güvenilen açık anahtarı (XML dosyası) geçici olarak değiştirir
     -BildirimAdresi        bildirimlerin okunacağı YEREL klasör (ağ yerine)
     -KurulanSurum / -DeskIdDeneme / -OturumVarDeneme   kurulu sürüm, ID ve açık oturum durumunu taklit eder
+    -KomutSatiriDene <pid>  verilen sürecin komut satırını yazıp çıkar (açık-oturum denetiminin okuyucusunu denemek için)
+    -OturumDene [-SurecAdiDene <ad>]  gerçek açık-oturum denetimini çalıştırıp "OTURUM-VAR: True/False" yazar ve çıkar
+                            (-SurecAdiDene: bakılacak süreç adı; varsayılan YildizDesk)
 #>
 [CmdletBinding()]
 param(
@@ -27,16 +32,21 @@ param(
   [string]$BildirimAdresi = '',
   [string]$KurulanSurum = '',
   [string]$DeskIdDeneme = '',
-  [switch]$OturumVarDeneme
+  [switch]$OturumVarDeneme,
+  [int]$KomutSatiriDene = 0,
+  [string]$SurecAdiDene = '',
+  [switch]$OturumDene
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 1
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
 
 # Deneme parametreleri normal çalışmada ETKİSİZDİR (güvenilen anahtar/adres başka yere yönlendirilemez).
-if (-not $SadeceDenetle) { $AcikAnahtarDosyasi = ''; $BildirimAdresi = ''; $KurulanSurum = ''; $DeskIdDeneme = ''; $OturumVarDeneme = $false }
+if (-not $SadeceDenetle) { $AcikAnahtarDosyasi = ''; $BildirimAdresi = ''; $KurulanSurum = ''; $DeskIdDeneme = ''; $OturumVarDeneme = $false; $KomutSatiriDene = 0; $SurecAdiDene = ''; $OturumDene = $false }
 
-$BetikSurumu = '1.0.0'
+$BetikSurumu = '1.0.1'
+$SurecAdi = 'YildizDesk'   # açık oturum (--cm) araması bu adlı süreçlerde yapılır
+if ($SurecAdiDene) { $SurecAdi = $SurecAdiDene }
 # ACIK-ANAHTAR-BASLA
 $GuvenilenAnahtar = '<RSAKeyValue><Modulus>pcUD0Adc5Y2BjKlBMhnJ0rRBndajzrvnGT5cEA0voICc8qpShYasTFVO7w3VKFba3JLFgI2GLxMkUfpiRoyRd7MwfvVygksuUY8V6Q3SYrrseAYZS/2Zr6JUo7qhmeu3aDc9Tvl8OHv4pr1/c3U4p4D9Mk7A0yIU0iSUxYokOw15GqIdaBl1WGJFnFaZH8km4wZMsArpVxqcTS4h9zhzladqphhXr8C1P+ZS4aWCqUBKz8b6NUSvrVcSUClsgnG0l5gfblHcle4WG4CswfU4Is0BDjr40TWuswMi3Q+zPsOr2+zIaFvUnsnb411bHh8rsaY1EFDGJH9dxtW9EgGC05vc255PNrgsSKGQzIoGNI4Xj1SZQPp4TfZGocPOEqxSwsYp4hEA+CgWvMqJY2qBm5r0h9EcD2j8qg2gLEI0so6/eGKtkQzSr67FIM2Rhs/fEFoQKuprlAWGxDO5sp45yhmMmnnLtwMtS7Tf4IfVZ2dVAM7U31TzKZEMQqchkpMV</Modulus><Exponent>AQAB</Exponent></RSAKeyValue>'
 # ACIK-ANAHTAR-BITIS
@@ -51,6 +61,34 @@ $HizmetAdi = 'YildizDesk'
 $EnCokDeneme = 3
 $UrlDeseni = '^https://destek\.yildizpos\.com/guncelle/YildizDesk-\d+(\.\d+){2,3}\.exe$'
 $BetikUrlDeseni = '^https://destek\.yildizpos\.com/guncelle/yildizdesk-guncelle-\d+(\.\d+){2,3}\.ps1$'
+
+# Süreç komut satırını DOĞRUDAN Windows'tan okur (NtQueryInformationProcess, sınıf 60). WMI/CIM KULLANILMAZ: bazı bilgisayarlarda
+# Get-CimInstance sonsuza dek takılır (gerçek bilgisayarda görüldü) ve "emin olamazsak güncelleme yapma" kuralı hiç devreye girmezdi.
+# C# kaynağı bilerek yalnızca ASCII. Dönüş: komut satırı; okunamazsa null.
+$SurecKodu = @'
+using System;
+using System.Runtime.InteropServices;
+public static class YdSurec {
+  [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr h, int sinif, IntPtr tampon, int uzunluk, out int donen);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint erisim, bool miras, int pid);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+  public static string KomutSatiri(int pid) {
+    IntPtr h = OpenProcess(0x1000, false, pid);  // PROCESS_QUERY_LIMITED_INFORMATION
+    if (h == IntPtr.Zero) return null;
+    try {
+      int n; NtQueryInformationProcess(h, 60, IntPtr.Zero, 0, out n);  // 60 = ProcessCommandLineInformation; n = gereken boyut
+      if (n <= 0 || n > 65536) return null;
+      IntPtr b = Marshal.AllocHGlobal(n);
+      try {
+        if (NtQueryInformationProcess(h, 60, b, n, out n) < 0) return null;
+        int uzunluk = (ushort)Marshal.ReadInt16(b);          // UNICODE_STRING.Length (bayt)
+        IntPtr metin = Marshal.ReadIntPtr(b, IntPtr.Size);   // UNICODE_STRING.Buffer
+        return metin == IntPtr.Zero ? "" : Marshal.PtrToStringUni(metin, uzunluk / 2);
+      } finally { Marshal.FreeHGlobal(b); }
+    } finally { CloseHandle(h); }
+  }
+}
+'@
 
 function Yaz([string]$Metin) {
   $satir = '{0:yyyy-MM-dd HH:mm:ss} {1}' -f (Get-Date), $Metin
@@ -110,8 +148,17 @@ function Desk-Id {
 function Oturum-Var {
   if ($OturumVarDeneme) { return $true }
   try {
-    $surecler = Get-CimInstance -ClassName Win32_Process -Filter "Name='YildizDesk.exe'" -ErrorAction Stop
-    foreach ($s in $surecler) { if ($s.CommandLine -match '(^|\s)--cm(-no-ui)?(\s|"|$)') { return $true } }
+    if (-not ('YdSurec' -as [type])) { Add-Type -TypeDefinition $SurecKodu -ErrorAction Stop }
+    foreach ($s in [Diagnostics.Process]::GetProcessesByName($SurecAdi)) {
+      $komut = [YdSurec]::KomutSatiri($s.Id)
+      if ($null -eq $komut) {
+        $bitti = $false
+        try { $bitti = $s.HasExited } catch { }
+        if ($bitti) { continue }   # arada kapanmış: sorun değil
+        return $true               # okunamayan canlı süreç: emin olamayız
+      }
+      if ($komut -match '(^|\s)--cm(-no-ui)?(\s|"|$)') { return $true }
+    }
     return $false
   } catch { return $true }   # emin olamazsak güncelleme YAPMA
 }
@@ -289,6 +336,18 @@ function Ana {
 if (-not $SadeceDenetle -and $GuvenilenAnahtar -notmatch 'RSAKeyValue') {
   Yaz 'Güvenilen açık anahtar gömülü değil: güncelleme KAPALI.'
   exit 2
+}
+
+# Deneme kancası (yalnızca -SadeceDenetle ile): verilen sürecin komut satırını yazıp çıkar; ağa/klasöre hiç dokunmaz.
+if ($SadeceDenetle -and $KomutSatiriDene -gt 0) {
+  Add-Type -TypeDefinition $SurecKodu
+  $k = [YdSurec]::KomutSatiri($KomutSatiriDene)
+  if ($null -eq $k) { Write-Host 'KOMUT-SATIRI: <okunamadi>' } else { Write-Host ('KOMUT-SATIRI: ' + $k) }
+  exit 0
+}
+if ($SadeceDenetle -and $OturumDene) {
+  Write-Host ('OTURUM-VAR: ' + (Oturum-Var))
+  exit 0
 }
 
 # --- giriş: tek kopya kilidi + rastgele gecikme ---

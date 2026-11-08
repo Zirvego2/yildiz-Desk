@@ -2,3 +2,4 @@
 
 # YildizDesk guncelleyici betikleri motora gomulur (include_bytes!): bayt bayt ayni kalmali (BOM + satir sonu); text=auto donusturmesin
 res/yildizdesk/*.ps1 -text
+res/yildizdesk/*.xml -text

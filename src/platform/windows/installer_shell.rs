@@ -81,7 +81,12 @@ pub(super) fn staged_shortcut_commands(
     Ok((commands, file))
 }
 
-/// Pakete gömülü bir dosyayı (YıldızDesk güncelleyici betikleri) korumalı kurulum klasörüne hazırlar.
+/// `%ProgramData%` klasörü (ortam değişkeninden değil, Windows'tan sorulur): YıldızDesk güncelleyici görev şablonuna yazılır.
+pub(super) fn program_data_directory() -> ResultType<PathBuf> {
+    get_known_folder(&FOLDERID_ProgramData)
+}
+
+/// Pakete gömülü bir dosyayı (YıldızDesk güncelleyici betiği ve görev şablonu) korumalı kurulum klasörüne hazırlar.
 /// `staged_shortcut_commands` ile AYNI güvenli yol (dosya kullanıcının yazabildiği `%TEMP%`'e konmaz); tek fark: kopya
 /// başarısız olursa kurulum DÜŞMEZ (`exit /b` yok). Güncelleyici "en iyi çaba"dır, motorun kurulumu onsuz da tamamlanmalıdır.
 pub(super) fn staged_file_commands(

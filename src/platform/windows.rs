@@ -111,8 +111,9 @@ pub use acl::{
 use installer_files::ProtectedInstallFile;
 use installer_handoff::{run_cmds, InstallCommands};
 use installer_shell::{
-    escape_nested_cmd_ampersands, shortcut_bytes, staged_file_commands, staged_shortcut_commands,
-    staged_tray_shortcut_commands, validate_install_value,
+    escape_nested_cmd_ampersands, get_system_executable, program_data_directory, shortcut_bytes,
+    staged_file_commands, staged_shortcut_commands, staged_tray_shortcut_commands,
+    validate_install_value,
 };
 pub use verified_update::{
     copy_and_verify_update_file_sha256, schedule_current_verified_update_file_cleanup,
@@ -1627,46 +1628,121 @@ fn get_after_install(
 }
 
 // ---- YıldızDesk güncelleyicisi (Görev Zamanlayıcı, SYSTEM) ----
-// Motorun kurulumu iki betiği gömülü taşır ve güncelleyiciyi yalnızca EKSİKSE kurar (yalnızca müşteri sürümü). Kaynak betikler
-// `Uzak-Destek\sunucu\restoran\` altındadır; `res/yildizdesk/` kopyaları onlarla BİREBİR aynı olmalıdır (`.gitattributes` bayt
-// değişimini engeller; `sunucu\guncelleme\kendini-dene.ps1` eşitliği denetler).
+// Motorun kurulumu güncelleyici betiğini ve görev şablonunu gömülü taşır ve güncelleyiciyi yalnızca EKSİKSE kurar (yalnızca müşteri
+// sürümü). Kaynaklar `Uzak-Destek\sunucu\restoran\` altındadır; `res/yildizdesk/` kopyaları onlarla BİREBİR aynı olmalıdır
+// (`.gitattributes` bayt değişimini engeller; `sunucu\guncelleme\kendini-dene.ps1` eşitliği denetler).
+//
+// NEDEN PowerShell/WMI YOK: `Get-ScheduledTask`/`Register-ScheduledTask` WMI (CIM) kullanır. Bazı bilgisayarlarda WMI takılır ve
+// kurulum SONSUZA KADAR beklerdi (gerçek denemede yaşandı: kurulum bitmedi, görev oluşmadı). Bu yüzden kurulum yalnızca yerel
+// araçlarla yapılır (md, icacls, copy, move, schtasks) ve hiçbir şeyi beklemez.
 
-const UPDATER_INSTALLER_PS1: &[u8] = include_bytes!("../../res/yildizdesk/guncelleyici-kur.ps1");
 const UPDATER_SCRIPT_PS1: &[u8] = include_bytes!("../../res/yildizdesk/yildizdesk-guncelle.ps1");
-const UPDATER_INSTALLER_FILENAME: &str = "guncelleyici-kur.ps1";
+const UPDATER_TASK_TEMPLATE: &str = include_str!("../../res/yildizdesk/yildizdesk-gorev.xml");
 const UPDATER_SCRIPT_FILENAME: &str = "yildizdesk-guncelle.ps1";
+const UPDATER_TASK_FILENAME: &str = "yildizdesk-gorev.xml";
 const UPDATER_TASK_NAME: &str = "YildizDesk Guncelle";
+const UPDATER_DATA_DIRECTORY: &str = "YildizDesk";
+const UPDATER_FIRST_RUN_DELAY_MINUTES: i64 = 10;
+
+/// Görev şablonundaki yer tutucuları doldurur (değerler XML-kaçışlıdır). Doldurulmamış yer tutucu kalırsa hata verir.
+fn updater_task_xml(
+    template: &str,
+    powershell: &str,
+    script: &str,
+    start: &str,
+) -> ResultType<String> {
+    fn escape(value: &str) -> ResultType<String> {
+        if value.chars().any(|c| c.is_control()) {
+            bail!("Updater task value contains control characters");
+        }
+        Ok(value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;"))
+    }
+    let xml = template
+        .replace("{{POWERSHELL_YOLU}}", &escape(powershell)?)
+        .replace("{{BETIK_YOLU}}", &escape(script)?)
+        .replace("{{BASLANGIC}}", &escape(start)?);
+    if xml.contains("{{") {
+        bail!("Updater task template has an unfilled placeholder");
+    }
+    Ok(xml)
+}
+
+/// `schtasks /XML` için UTF-16 LE + BOM (şablon bildirimi `encoding="UTF-16"`).
+fn utf16le_with_bom(text: &str) -> Vec<u8> {
+    let mut bytes = vec![0xFF, 0xFE];
+    for unit in text.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes
+}
 
 /// Güncelleyiciyi kuracak komutları ve korumalı klasöre hazırlanan dosyaları döndürür.
 /// - Yalnızca müşteri sürümünde (`conn-type=incoming`); yönetici motoru (YildizDeskAdmin) boş döner.
-/// - Yalnızca EKSİKSE kurar (`-SadeceEksikse`): çalışan bir güncelleme görevini silip yeniden yaratmak güncelleyiciyi öldürürdü
+/// - Yalnızca EKSİKSE kurar: çalışan bir güncelleme görevini silip yeniden yaratmak güncelleyiciyi öldürürdü
 ///   (güncelleyici kendi `--update`/`--silent-install` adımını çağırır).
 fn updater_install_commands() -> ResultType<(String, Vec<ProtectedInstallFile>)> {
     if !config::is_incoming_only() {
         return Ok((String::new(), Vec::new()));
     }
-    let (copy_installer, installer_file) =
-        staged_file_commands(UPDATER_INSTALLER_PS1, UPDATER_INSTALLER_FILENAME, "ps1")?;
-    let (copy_updater, updater_file) =
+    let script_path = program_data_directory()?
+        .join(UPDATER_DATA_DIRECTORY)
+        .join(UPDATER_SCRIPT_FILENAME);
+    let powershell = get_system_executable("WindowsPowerShell\\v1.0\\powershell.exe")?;
+    let start = (chrono::Local::now() + chrono::Duration::minutes(UPDATER_FIRST_RUN_DELAY_MINUTES))
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
+    let as_text = |path: &std::path::Path| {
+        path.to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!("Path is not valid Unicode: {:?}", path))
+    };
+    let xml = updater_task_xml(
+        UPDATER_TASK_TEMPLATE,
+        &as_text(&powershell)?,
+        &as_text(&script_path)?,
+        &start,
+    )?;
+    let (copy_script, script_file) =
         staged_file_commands(UPDATER_SCRIPT_PS1, UPDATER_SCRIPT_FILENAME, "ps1")?;
+    let (copy_task, task_file) =
+        staged_file_commands(&utf16le_with_bom(&xml), UPDATER_TASK_FILENAME, "xml")?;
     Ok((
-        updater_install_script(&copy_installer, &copy_updater),
-        vec![installer_file, updater_file],
+        updater_install_script(&copy_script, &copy_task),
+        vec![script_file, task_file],
     ))
 }
 
-/// Saf komut üreticisi (birim testi için ayrı). En iyi çaba: hiçbir satır `exit /b` kullanmaz ve betiğin çıkış kodu yok sayılır
-/// (korumalı kurulum betiği zaten `exit /b 0` ile biter). PowerShell TAM YOLLA çağrılır: korumalı kurulumun PATH'i yalnızca
-/// System32'dir (`trusted_install_environment`).
-fn updater_install_script(copy_installer: &str, copy_updater: &str) -> String {
+/// Saf komut üreticisi (birim testi için ayrı). En iyi çaba: hiçbir satır `exit /b` kullanmaz; başarısız adımda `goto` ile
+/// sona atlanır (korumalı kurulum betiği zaten `exit /b 0` ile biter). Araçlar `PATH`'ten çağrılır: korumalı kurulumun PATH'i
+/// yalnızca System32'dir (`trusted_install_environment`).
+/// Sıra (hepsi başarılıysa devam eder, biri başarısızsa görev OLUŞTURULMAZ: kilitsiz klasörden SYSTEM betiği çalışmasın):
+///   zaten kurulu mu (görev + betik) -> yeniden yönlendirme noktası değil mi -> klasör -> sahip + kilitli izinler -> betik -> görev.
+fn updater_install_script(copy_script: &str, copy_task: &str) -> String {
     format!(
         "
-{copy_installer}
-{copy_updater}
-if exist \"%RUSTDESK_OUTPUT_DIR%\\{installer}\" if exist \"%RUSTDESK_OUTPUT_DIR%\\{script}\" \"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%RUSTDESK_OUTPUT_DIR%\\{installer}\" -SadeceEksikse -BetikYolu \"%RUSTDESK_OUTPUT_DIR%\\{script}\" > nul 2>&1
+{copy_script}
+{copy_task}
+schtasks /Query /TN \"{task}\" > nul 2>&1 && if exist \"%ProgramData%\\{dir}\\{script}\" goto :yildizdesk_updater_done
+if not exist \"%RUSTDESK_OUTPUT_DIR%\\{script}\" goto :yildizdesk_updater_done
+if not exist \"%RUSTDESK_OUTPUT_DIR%\\{xml}\" goto :yildizdesk_updater_done
+fsutil reparsepoint query \"%ProgramData%\\{dir}\" > nul 2>&1 && goto :yildizdesk_updater_done
+if not exist \"%ProgramData%\\{dir}\" md \"%ProgramData%\\{dir}\" > nul 2>&1
+icacls \"%ProgramData%\\{dir}\" /setowner \"*S-1-5-32-544\" > nul 2>&1 || goto :yildizdesk_updater_done
+icacls \"%ProgramData%\\{dir}\" /inheritance:r /grant:r \"*S-1-5-18:(OI)(CI)F\" \"*S-1-5-32-544:(OI)(CI)F\" > nul 2>&1 || goto :yildizdesk_updater_done
+copy /B /Y \"%RUSTDESK_OUTPUT_DIR%\\{script}\" \"%ProgramData%\\{dir}\\{script}.yeni\" > nul 2>&1 || goto :yildizdesk_updater_done
+move /Y \"%ProgramData%\\{dir}\\{script}.yeni\" \"%ProgramData%\\{dir}\\{script}\" > nul 2>&1 || goto :yildizdesk_updater_done
+schtasks /Create /TN \"{task}\" /XML \"%RUSTDESK_OUTPUT_DIR%\\{xml}\" /F > nul 2>&1
+:yildizdesk_updater_done
 ",
-        installer = UPDATER_INSTALLER_FILENAME,
+        task = UPDATER_TASK_NAME,
+        dir = UPDATER_DATA_DIRECTORY,
         script = UPDATER_SCRIPT_FILENAME,
+        xml = UPDATER_TASK_FILENAME,
     )
 }
 
@@ -4965,21 +5041,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn updater_install_script_is_best_effort_and_uses_trusted_paths() {
-        let script = updater_install_script("COPY_INSTALLER", "COPY_UPDATER");
-        assert!(script.contains("COPY_INSTALLER") && script.contains("COPY_UPDATER"));
+    fn updater_install_script_is_best_effort_native_and_fail_closed() {
+        let script = updater_install_script("COPY_SCRIPT", "COPY_TASK");
+        assert!(script.contains("COPY_SCRIPT") && script.contains("COPY_TASK"));
         // Yalnızca eksikse kurulur (çalışan bir güncelleme görevi bozulmaz).
-        assert!(script.contains("-SadeceEksikse"));
-        // PowerShell TAM YOLLA çağrılır: korumalı kurulumun PATH'i yalnızca System32'dir.
-        assert!(script.contains("%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"));
+        assert!(script.contains("schtasks /Query /TN \"YildizDesk Guncelle\""));
+        assert!(script.contains("goto :yildizdesk_updater_done"));
+        // PowerShell/WMI YOK (takılabilir); yalnızca yerel araçlar.
+        assert!(!script.to_lowercase().contains("powershell"));
+        assert!(script.contains("schtasks /Create /TN \"YildizDesk Guncelle\" /XML"));
+        // Klasör kilitleme başarısızsa görev OLUŞTURULMAZ (kilitsiz klasörden SYSTEM betiği çalışmasın).
+        assert!(script.contains("/setowner \"*S-1-5-32-544\" > nul 2>&1 || goto :yildizdesk_updater_done"));
+        assert!(script.contains("/inheritance:r /grant:r \"*S-1-5-18:(OI)(CI)F\" \"*S-1-5-32-544:(OI)(CI)F\" > nul 2>&1 || goto :yildizdesk_updater_done"));
+        assert!(script.contains("fsutil reparsepoint query"));
         // En iyi çaba: hiçbir satır motorun kurulumunu düşürmez.
         assert!(!script.contains("exit /b"));
-        // İki dosya da hazırsa çağrılır.
-        assert_eq!(script.matches("if exist").count(), 2);
-        // Gömülü betikler BOM'lu (Windows PowerShell 5.1 Türkçe karakterleri bununla okur) ve dolu.
-        assert!(UPDATER_INSTALLER_PS1.starts_with(&[0xEF, 0xBB, 0xBF]));
+        assert_eq!(script.matches(":yildizdesk_updater_done").count(), script.matches("goto :yildizdesk_updater_done").count() + 1);
+        // Gömülü betik BOM'lu (Windows PowerShell 5.1 Türkçe karakterleri bununla okur) ve dolu; şablonun üç yer tutucusu var.
         assert!(UPDATER_SCRIPT_PS1.starts_with(&[0xEF, 0xBB, 0xBF]));
-        assert!(UPDATER_INSTALLER_PS1.len() > 1000 && UPDATER_SCRIPT_PS1.len() > 10_000);
+        assert!(UPDATER_SCRIPT_PS1.len() > 10_000);
+        for placeholder in ["{{POWERSHELL_YOLU}}", "{{BETIK_YOLU}}", "{{BASLANGIC}}"] {
+            assert!(UPDATER_TASK_TEMPLATE.contains(placeholder), "{placeholder}");
+        }
+    }
+
+    #[test]
+    fn updater_task_xml_fills_escapes_and_encodes() {
+        let xml = updater_task_xml(
+            UPDATER_TASK_TEMPLATE,
+            "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            "C:\\Program&Data\\YildizDesk\\yildizdesk-guncelle.ps1",
+            "2026-11-09T01:00:00",
+        )
+        .unwrap();
+        assert!(!xml.contains("{{"));
+        assert!(xml.contains("C:\\Program&amp;Data\\YildizDesk\\yildizdesk-guncelle.ps1"));
+        assert!(xml.contains("<StartBoundary>2026-11-09T01:00:00</StartBoundary>"));
+        // Doldurulmamış yer tutucu ve denetim karakteri reddedilir.
+        assert!(updater_task_xml("{{BILINMEYEN}}", "a", "b", "c").is_err());
+        assert!(updater_task_xml(UPDATER_TASK_TEMPLATE, "a\r\nb", "b", "c").is_err());
+        // UTF-16 LE + BOM; geri çözülünce aynı metin.
+        let bytes = utf16le_with_bom(&xml);
+        assert_eq!(&bytes[..2], &[0xFF, 0xFE]);
+        let units: Vec<u16> = bytes[2..]
+            .chunks(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        assert_eq!(String::from_utf16(&units).unwrap(), xml);
     }
 
     #[test]
