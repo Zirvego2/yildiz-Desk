@@ -108,9 +108,10 @@ pub use acl::{
     set_path_permission_for_portable_service_shmem_file,
     validate_path_for_portable_service_shmem_dir,
 };
+use installer_files::ProtectedInstallFile;
 use installer_handoff::{run_cmds, InstallCommands};
 use installer_shell::{
-    escape_nested_cmd_ampersands, shortcut_bytes, staged_shortcut_commands,
+    escape_nested_cmd_ampersands, shortcut_bytes, staged_file_commands, staged_shortcut_commands,
     staged_tray_shortcut_commands, validate_install_value,
 };
 pub use verified_update::{
@@ -1625,6 +1626,74 @@ fn get_after_install(
     ", create_service=get_create_service(&exe))
 }
 
+// ---- YıldızDesk güncelleyicisi (Görev Zamanlayıcı, SYSTEM) ----
+// Motorun kurulumu iki betiği gömülü taşır ve güncelleyiciyi yalnızca EKSİKSE kurar (yalnızca müşteri sürümü). Kaynak betikler
+// `Uzak-Destek\sunucu\restoran\` altındadır; `res/yildizdesk/` kopyaları onlarla BİREBİR aynı olmalıdır (`.gitattributes` bayt
+// değişimini engeller; `sunucu\guncelleme\kendini-dene.ps1` eşitliği denetler).
+
+const UPDATER_INSTALLER_PS1: &[u8] = include_bytes!("../../res/yildizdesk/guncelleyici-kur.ps1");
+const UPDATER_SCRIPT_PS1: &[u8] = include_bytes!("../../res/yildizdesk/yildizdesk-guncelle.ps1");
+const UPDATER_INSTALLER_FILENAME: &str = "guncelleyici-kur.ps1";
+const UPDATER_SCRIPT_FILENAME: &str = "yildizdesk-guncelle.ps1";
+const UPDATER_TASK_NAME: &str = "YildizDesk Guncelle";
+
+/// Güncelleyiciyi kuracak komutları ve korumalı klasöre hazırlanan dosyaları döndürür.
+/// - Yalnızca müşteri sürümünde (`conn-type=incoming`); yönetici motoru (YildizDeskAdmin) boş döner.
+/// - Yalnızca EKSİKSE kurar (`-SadeceEksikse`): çalışan bir güncelleme görevini silip yeniden yaratmak güncelleyiciyi öldürürdü
+///   (güncelleyici kendi `--update`/`--silent-install` adımını çağırır).
+fn updater_install_commands() -> ResultType<(String, Vec<ProtectedInstallFile>)> {
+    if !config::is_incoming_only() {
+        return Ok((String::new(), Vec::new()));
+    }
+    let (copy_installer, installer_file) =
+        staged_file_commands(UPDATER_INSTALLER_PS1, UPDATER_INSTALLER_FILENAME, "ps1")?;
+    let (copy_updater, updater_file) =
+        staged_file_commands(UPDATER_SCRIPT_PS1, UPDATER_SCRIPT_FILENAME, "ps1")?;
+    Ok((
+        updater_install_script(&copy_installer, &copy_updater),
+        vec![installer_file, updater_file],
+    ))
+}
+
+/// Saf komut üreticisi (birim testi için ayrı). En iyi çaba: hiçbir satır `exit /b` kullanmaz ve betiğin çıkış kodu yok sayılır
+/// (korumalı kurulum betiği zaten `exit /b 0` ile biter). PowerShell TAM YOLLA çağrılır: korumalı kurulumun PATH'i yalnızca
+/// System32'dir (`trusted_install_environment`).
+fn updater_install_script(copy_installer: &str, copy_updater: &str) -> String {
+    format!(
+        "
+{copy_installer}
+{copy_updater}
+if exist \"%RUSTDESK_OUTPUT_DIR%\\{installer}\" if exist \"%RUSTDESK_OUTPUT_DIR%\\{script}\" \"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%RUSTDESK_OUTPUT_DIR%\\{installer}\" -SadeceEksikse -BetikYolu \"%RUSTDESK_OUTPUT_DIR%\\{script}\" > nul 2>&1
+",
+        installer = UPDATER_INSTALLER_FILENAME,
+        script = UPDATER_SCRIPT_FILENAME,
+    )
+}
+
+/// Kullanıcı kaldırmasında güncelleyici görevini ve KENDİ dosyalarını siler (yalnızca müşteri sürümü). `get_uninstall`'a
+/// EKLENMEZ: `install_me` de onu ilk adımda çalıştırır; yeniden kurulumda çalışan görevi silerdi. Klasörün tamamı silinmez
+/// (motor kayıtları `ProgramData\<uygulama>\recording` altında tutabilir): son `rd` özyinelemesizdir, klasörü yalnızca boşsa kaldırır.
+fn updater_uninstall_commands() -> String {
+    if !config::is_incoming_only() {
+        return String::new();
+    }
+    format!(
+        "
+schtasks /Delete /TN \"{task}\" /F > nul 2>&1
+if exist \"%PROGRAMDATA%\\YildizDesk\\{script}\" del /f /q \"%PROGRAMDATA%\\YildizDesk\\{script}\" > nul 2>&1
+if exist \"%PROGRAMDATA%\\YildizDesk\\{script}.yeni\" del /f /q \"%PROGRAMDATA%\\YildizDesk\\{script}.yeni\" > nul 2>&1
+if exist \"%PROGRAMDATA%\\YildizDesk\\guncelle.log\" del /f /q \"%PROGRAMDATA%\\YildizDesk\\guncelle.log\" > nul 2>&1
+if exist \"%PROGRAMDATA%\\YildizDesk\\guncelle.log.1\" del /f /q \"%PROGRAMDATA%\\YildizDesk\\guncelle.log.1\" > nul 2>&1
+if exist \"%PROGRAMDATA%\\YildizDesk\\denemeler.json\" del /f /q \"%PROGRAMDATA%\\YildizDesk\\denemeler.json\" > nul 2>&1
+if exist \"%PROGRAMDATA%\\YildizDesk\\yedek\" rd /s /q \"%PROGRAMDATA%\\YildizDesk\\yedek\" > nul 2>&1
+if exist \"%PROGRAMDATA%\\YildizDesk\\guncelle\" rd /s /q \"%PROGRAMDATA%\\YildizDesk\\guncelle\" > nul 2>&1
+if exist \"%PROGRAMDATA%\\YildizDesk\" rd \"%PROGRAMDATA%\\YildizDesk\" > nul 2>&1
+",
+        task = UPDATER_TASK_NAME,
+        script = UPDATER_SCRIPT_FILENAME,
+    )
+}
+
 pub fn install_me(options: &str, path: String, silent: bool, debug: bool) -> ResultType<()> {
     // MSI and EXE installations use different registry layouts, so MSI-to-EXE upgrades are not supported.
     let (installed_subkey, _, _, _) = get_install_info();
@@ -1770,6 +1839,12 @@ copy /Y \"{tmp_path}\\{app_name} Tray.lnk\" \"%PROGRAMDATA%\\Microsoft\\Windows\
         &exe,
         true,
     )?;
+    // YıldızDesk güncelleyicisi: yalnızca müşteri sürümünde ve yalnızca eksikse kurulur (bkz. `updater_install_commands`).
+    // En iyi çaba: hazırlık hata verirse motorun kurulumu yine tamamlanır.
+    let (updater_cmds, updater_files) = updater_install_commands().unwrap_or_else(|err| {
+        log::warn!("Skipping the updater installation step: {err:#}");
+        (String::new(), Vec::new())
+    });
     // Remember to check if `update_me` need to be changed if changing the `cmds`.
     // No need to merge the existing dup code, because the code in these two functions are too critical.
     // New code should be written in a common function.
@@ -1801,6 +1876,7 @@ copy /Y \"{tmp_path}\\Uninstall {app_name}.lnk\" \"{path}\\\"
 {dels}
 {import_config}
 {after_install}
+{updater_install}
 {sleep}
     ",
         display_icon = shortcut_icon_location.as_deref().unwrap_or(exe.as_str()),
@@ -1811,11 +1887,14 @@ copy /Y \"{tmp_path}\\Uninstall {app_name}.lnk\" \"{path}\\\"
         dels = if debug { "" } else { &dels },
         copy_exe = copy_exe_cmd(&src_exe, &exe, &path)?,
         import_config = get_import_config(&exe),
+        updater_install = updater_cmds,
     );
+    let mut install_files = vec![mk_shortcut_file, uninstall_shortcut_file, tray_shortcut_file];
+    install_files.extend(updater_files);
     run_cmds(
         InstallCommands {
             script: cmds,
-            files: vec![mk_shortcut_file, uninstall_shortcut_file, tray_shortcut_file],
+            files: install_files,
         },
         debug,
         "install",
@@ -1919,7 +1998,14 @@ pub fn uninstall_me(kill_self: bool) -> ResultType<()> {
             .build()?
             .block_on(crate::trusted_devices::config::refresh_from_server())?;
     }
-    run_cmds(get_uninstall(kill_self, true)?, true, "uninstall")
+    // Güncelleyici görevi/dosyaları yalnızca KULLANICI kaldırmasında silinir: `install_me` de `get_uninstall`'ı çalıştırır,
+    // bu yüzden silme komutları ona eklenmez (yeniden kurulumda çalışan görevi öldürürdü).
+    let cmds = format!(
+        "{}{}",
+        get_uninstall(kill_self, true)?,
+        updater_uninstall_commands()
+    );
+    run_cmds(cmds, true, "uninstall")
 }
 
 fn write_vbs(cmds: String, tip: &str) -> ResultType<PathBuf> {
@@ -4877,6 +4963,24 @@ pub(super) fn get_pids_with_first_arg_by_wmic<S1: AsRef<str>, S2: AsRef<str>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn updater_install_script_is_best_effort_and_uses_trusted_paths() {
+        let script = updater_install_script("COPY_INSTALLER", "COPY_UPDATER");
+        assert!(script.contains("COPY_INSTALLER") && script.contains("COPY_UPDATER"));
+        // Yalnızca eksikse kurulur (çalışan bir güncelleme görevi bozulmaz).
+        assert!(script.contains("-SadeceEksikse"));
+        // PowerShell TAM YOLLA çağrılır: korumalı kurulumun PATH'i yalnızca System32'dir.
+        assert!(script.contains("%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"));
+        // En iyi çaba: hiçbir satır motorun kurulumunu düşürmez.
+        assert!(!script.contains("exit /b"));
+        // İki dosya da hazırsa çağrılır.
+        assert_eq!(script.matches("if exist").count(), 2);
+        // Gömülü betikler BOM'lu (Windows PowerShell 5.1 Türkçe karakterleri bununla okur) ve dolu.
+        assert!(UPDATER_INSTALLER_PS1.starts_with(&[0xEF, 0xBB, 0xBF]));
+        assert!(UPDATER_SCRIPT_PS1.starts_with(&[0xEF, 0xBB, 0xBF]));
+        assert!(UPDATER_INSTALLER_PS1.len() > 1000 && UPDATER_SCRIPT_PS1.len() > 10_000);
+    }
 
     #[test]
     fn vbs_files_use_utf16le_with_bom_and_crlf() {

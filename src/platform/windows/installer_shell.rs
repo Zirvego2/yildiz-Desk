@@ -81,6 +81,22 @@ pub(super) fn staged_shortcut_commands(
     Ok((commands, file))
 }
 
+/// Pakete gömülü bir dosyayı (YıldızDesk güncelleyici betikleri) korumalı kurulum klasörüne hazırlar.
+/// `staged_shortcut_commands` ile AYNI güvenli yol (dosya kullanıcının yazabildiği `%TEMP%`'e konmaz); tek fark: kopya
+/// başarısız olursa kurulum DÜŞMEZ (`exit /b` yok). Güncelleyici "en iyi çaba"dır, motorun kurulumu onsuz da tamamlanmalıdır.
+pub(super) fn staged_file_commands(
+    bytes: &[u8],
+    filename: &str,
+    extension: &str,
+) -> ResultType<(String, ProtectedInstallFile)> {
+    validate_install_value(filename)?;
+    validate_install_value(extension)?;
+    let file = ProtectedInstallFile::new(&directory::path()?.with_extension(extension), bytes)?;
+    let source = path_for_cmd_environment(file.path())?;
+    let commands = format!("copy /B /Y \"{source}\" \"%RUSTDESK_OUTPUT_DIR%\\{filename}\" > nul");
+    Ok((commands, file))
+}
+
 pub(super) fn staged_tray_shortcut_commands(
     app_name: &str,
     exe: &str,
