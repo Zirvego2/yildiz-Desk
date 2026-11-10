@@ -1,8 +1,10 @@
-name: YildizDesk Windows x64
+name: YildizDesk Windows x64 + x86
 
 # YildizDesk, RustDesk 1.5.1 kaynak kodunun degistirilmis halidir (AGPL-3.0).
-# Bu is akisi yalnizca Windows x64 icin tek dosyalik (kendi kendini acan) YildizDesk.exe uretir.
-# Elle baslatilir: Actions > "YildizDesk Windows x64" > Run workflow.
+# Bu is akisi Windows icin tek dosyalik (kendi kendini acan) paketler uretir:
+#   - x64 (Flutter): YildizDesk.exe (musteri) + YildizDeskAdmin.exe (yonetici) -> artifact YildizDesk-windows-x64
+#   - x86 (32-bit, Sciter arayuzu; RustDesk'in kendi 32-bit yontemi): yalnizca musteri YildizDesk.exe -> YildizDesk-windows-x86
+# Iki is paralel calisir. Elle baslatilir: Actions > "YildizDesk Windows x64 + x86" > Run workflow.
 
 on:
   workflow_dispatch:
@@ -178,4 +180,105 @@ jobs:
           path: |
             ./SignOutput/YildizDesk.exe
             ./SignOutput/YildizDeskAdmin.exe
+          if-no-files-found: error
+
+  # 32-bit Windows (Yildiz POS'un 32-bit kasalari). RustDesk 1.5.1 flutter-build.yml "build-for-windows-sciter" isinden
+  # uyarlandi; RustDesk'in imza/yayin/guncelleme adimlari cikarildi. Flutter 32-bit Windows'u desteklemedigi icin Sciter
+  # arayuzu kullanilir. Kimlik dosya adindan secildigi icin program YildizDesk.exe adiyla paketlenir (yalnizca gelen baglanti).
+  # Bu pakette YildizDesk guncelleyicisi kurulmaz (src/platform/windows.rs: updater_install_commands).
+  build-windows-x86:
+    name: Windows x86 (32-bit, Sciter)
+    runs-on: windows-2022
+    steps:
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Install LLVM and Clang (32-bit)
+        uses: rustdesk-org/install-llvm-action-32bit@6aa7d9ad3df84dff01cd4596dd0fc880a7f47fce # no release tag; commit 2026-05-26
+        with:
+          version: ${{ env.LLVM_VERSION }}
+
+      - name: Install Rust toolchain (i686 nightly)
+        shell: bash
+        run: |
+          # Sciter'in abi_thiscall ozelligi nightly Rust ister; 32-bit LLVM'i yukleyebilmek icin i686 ana arac zinciri.
+          # rustup 1.29.1'den beri x64 Windows'ta i686 arac zinciri --force-non-host ister.
+          rustup toolchain install nightly-2023-10-13-i686-pc-windows-msvc \
+            --target i686-pc-windows-msvc --component rustfmt \
+            --profile minimal --no-self-update --force-non-host
+          rustup default nightly-2023-10-13-i686-pc-windows-msvc --force-non-host
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: windows-2022-sciter-x86
+
+      - name: Setup vcpkg with Github Actions binary cache
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: x86-windows-static
+        run: |
+          if ! $VCPKG_ROOT/vcpkg \
+            install \
+            --triplet x86-windows-static \
+            --x-install-root="$VCPKG_ROOT/installed"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+              echo "$_1:"
+              echo "======"
+              cat "$_1"
+              echo "======"
+              echo ""
+            done
+            exit 1
+          fi
+        shell: bash
+
+      - name: Build YildizDesk (x86, Sciter)
+        shell: bash
+        run: |
+          python3 res/inline-sciter.py
+          # Sciter x86 yamasi (RustDesk 1.5.1 ile ayni)
+          sed -i 's/branch = "dyn"/branch = "dyn_x86"/g' ./Cargo.toml
+          cargo update -p sciter-rs --precise 674e07d3066ca9a92ced3816203ab6b652629d1e
+          cargo build --locked --features inline,vram,hwcodec --release --bins
+          mkdir -p ./Release
+          mv ./target/release/rustdesk.exe ./Release/YildizDesk.exe
+          curl -LJ -o ./Release/sciter.dll https://github.com/c-smile/sciter-sdk/raw/master/bin.win/x32/sciter.dll
+          curl -LJ -o ./usbmmidd_v2.zip https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip
+          unzip usbmmidd_v2.zip
+          # x64 dosyalari silinmez: 32-bit program 64-bit Windows'ta da calisabilir (RustDesk ile ayni).
+          rm -rf ./usbmmidd_v2/deviceinstaller.exe ./usbmmidd_v2/usbmmidd.bat
+          mv ./usbmmidd_v2 ./Release || true
+
+      - name: Build self-extracted executable (YildizDesk.exe, x86)
+        shell: bash
+        run: |
+          sed -i '/dpiAware/d' res/manifest.xml
+          mkdir -p ./SignOutput
+          pip3 install -r libs/portable/requirements.txt
+          pushd ./libs/portable
+          python3 ./generate.py -f ../../Release/ -o . -e ../../Release/YildizDesk.exe
+          popd
+          mv ./target/release/rustdesk-portable-packer.exe ./SignOutput/YildizDesk.exe
+          ls -l ./SignOutput
+
+      - name: Upload YildizDesk.exe (x86)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: YildizDesk-windows-x86
+          path: ./SignOutput/YildizDesk.exe
           if-no-files-found: error

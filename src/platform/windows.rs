@@ -1686,7 +1686,9 @@ fn utf16le_with_bom(text: &str) -> Vec<u8> {
 /// - Yalnızca EKSİKSE kurar: çalışan bir güncelleme görevini silip yeniden yaratmak güncelleyiciyi öldürürdü
 ///   (güncelleyici kendi `--update`/`--silent-install` adımını çağırır).
 fn updater_install_commands() -> ResultType<(String, Vec<ProtectedInstallFile>)> {
-    if !config::is_incoming_only() {
+    // 32-bit (x86, Sciter) paket: güncelleme bildirimi yalnızca 64-bit YildizDesk sunar; 32-bit Windows'ta indirilen paket
+    // çalışmaz. Bu yüzden 32-bit kurulumda güncelleyici hiç kurulmaz (kaldırma komutları zararsızdır, aynen kalır).
+    if !config::is_incoming_only() || cfg!(target_arch = "x86") {
         return Ok((String::new(), Vec::new()));
     }
     let script_path = program_data_directory()?
